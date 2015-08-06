@@ -87,13 +87,190 @@ static void signal_cb(EV_P_ ev_signal *w, int revents);
 
 int verbose = 0;
 
-static int remote_conn = 0;
-static int server_conn = 0;
+static struct cork_hash_table servers;
 
-static struct cork_dllist connections;
-
-static void stat_update_cb(EV_P_ ev_timer *watcher, int revents)
+#ifndef __MINGW32__
+int setnonblocking(int fd)
 {
+    int flags;
+    if (-1 == (flags = fcntl(fd, F_GETFL, 0))) {
+        flags = 0;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+#endif
+
+static char *get_data(char *buf, int len) {
+    char *data;
+    int pos = 0;
+
+    while(buf[pos] != '{' && pos < len) pos++;
+    if (pos == len) return NULL;
+    data = buf + pos - 1;
+
+    while(buf[pos] != '}' && pos < len) pos++;
+    if (pos == len) return NULL;
+    buf[pos] = '\0';
+
+    return data;
+}
+
+static char *get_action(char *buf, int len) {
+    char *action;
+    int pos = 0;
+
+    while(isspace(buf[pos]) && pos < len) pos++;
+    if (pos == len) return NULL;
+    action = buf + pos;
+
+    while((!isspace(buf[pos]) || buf[pos] != ':') && pos < len) pos++;
+    if (pos == len) return NULL;
+    buf[pos] = '\0';
+
+    return action;
+}
+
+static struct server *get_server(char *buf, int len) {
+    struct server *server = (struct server *)malloc(sizeof(struct server));
+    char *data = get_data(buf, len);
+
+    memset(server, 0, sizeof(struct server));
+
+    obj = json_parse_ex(&settings, data, strlen(data), error_buf);
+    if (obj == NULL) {
+        LOGE(error_buf);
+        return NULL;
+    }
+
+    if (obj->type == json_object) {
+        int i = 0;
+        for (i = 0; i < obj->u.object.length; i++) {
+            char *name = obj->u.object.values[i].name;
+            json_value *value = obj->u.object.values[i].value;
+            if (strcmp(name, "server_port") == 0) {
+                if (value->type == json_string) {
+                    strncpy(server->port, value->u.string.ptr, 8);
+                }
+            } else if (strcmp(name, "password") == 0) {
+                if (value->type == json_string) {
+                    strncpy(server->password, value->u.string.ptr, 128);
+                }
+            } else {
+                LOGE("invalid data: %s", data);
+                return NULl;
+            }
+        }
+    }
+
+    return server;
+}
+
+static int get_traffic(char *buf, int len, char *port, uint64_t *traffic) {
+    char *data = get_data(buf, len);
+
+    obj = json_parse_ex(&settings, data, strlen(data), error_buf);
+    if (obj == NULL) {
+        LOGE(error_buf);
+        return -1;
+    }
+
+    if (obj->type == json_object) {
+        int i = 0;
+        for (i = 0; i < obj->u.object.length; i++) {
+            char *name = obj->u.object.values[i].name;
+            json_value *value = obj->u.object.values[i].value;
+            if (value->type == json_integer) {
+                strncpy(port, name, 8);
+                *traffic = value->u.integer;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void add_server(struct server *server)
+{
+
+}
+
+static void remove_server(struct server *server)
+{
+
+}
+
+static void update_stat(char *port, uint64_t traffic)
+{
+
+}
+
+static void manager_recv_cb(EV_P_ ev_io *w, int revents)
+{
+    struct manager_ctx *manager = (struct manager_ctx *)w;
+    socklen_t len;
+    size_t r;
+    char buf[BUF_SIZE];
+    memset(buf, 0, BUF_SIZE);
+
+    json_value *obj;
+    json_settings settings = { 0 };
+    char error_buf[512];
+
+
+    len = sizeof(struct sockaddr_un);
+    r = recvfrom(sfd, buf, BUF_SIZE, 0, (struct sockaddr *) &claddr, &len);
+    if (r == -1) {
+        ERROR("manager_recvfrom");
+        return;
+    }
+
+    if (r > BUF_SIZE / 2) {
+        LOGE("too large request: %d", (int)r);
+        return;
+    }
+
+    char *action = get_action(buf, r);
+
+    if (strcmp(action, "add") == 0) {
+        struct server *server = get_server(buf, r);
+
+        if (server == NULL || server->port[0] == 0 || server->password[0] == 0) {
+            LOGE("invalid command: %s", buf);
+            return;
+        }
+
+        remove_server(server->port);
+        add_server(server);
+
+    } else if (strcmp(action, "remove") == 0) {
+        struct server *server = get_server(buf, r);
+
+        if (server == NULL || server->port[0] == 0) {
+            LOGE("invalid command: %s", buf);
+            return;
+        }
+
+        remove_server(server->port);
+        free(server);
+
+    } else if (strcmp(action, "stat") == 0) {
+        char port[8];
+        uint64_t traffic;
+
+        if (get_traffic(buf, r, port, &traffic) == -1) {
+            LOGE("invalid command: %s", buf);
+            return;
+        }
+
+        update_stat(port, traffic);
+
+    } else if (strcmp(action, "ping") == 0) {
+    }
+
+
+        if (sendto(sfd, buf, numBytes, 0, (struct sockaddr *) &claddr, len) !=
+                numBytes)
+            fatal("sendto");
     struct sockaddr_un svaddr, claddr;
     int sfd;
     size_t msgLen;
@@ -423,9 +600,7 @@ int main(int argc, char **argv)
 
     struct sockaddr_un svaddr, claddr;
     int sfd, j;
-    ssize_t numBytes;
     socklen_t len;
-    char buf[BUF_SIZE];
 
     sfd = socket(AF_UNIX, SOCK_DGRAM, 0);       /*  Create server socket */
     if (sfd == -1)
@@ -442,6 +617,11 @@ int main(int argc, char **argv)
 
     if (bind(sfd, (struct sockaddr *) &svaddr, sizeof(struct sockaddr_un)) == -1)
         errExit("bind");
+
+    manager.fd = sfd;
+    ev_io_init(&manager.io, manager_recv_cb, manager.fd, EV_READ);
+    ev_io_start(loop, &manager.io);
+
 
     /*  Receive messages, convert to uppercase, and return to client
      *  */
