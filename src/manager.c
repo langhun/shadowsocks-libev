@@ -388,11 +388,6 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         update_stat(port, traffic);
 
-        char msg[3] = "ok";
-        if (sendto(manager->fd, msg, 3, 0, (struct sockaddr *)&claddr, len) != 3) {
-            ERROR("stat_sendto");
-        }
-
     } else if (strcmp(action, "ping") == 0) {
 
         struct cork_hash_table_entry  *entry;
