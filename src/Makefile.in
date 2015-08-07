@@ -152,8 +152,8 @@ ss_local_DEPENDENCIES = $(am__DEPENDENCIES_2) \
 ss_local_LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(ss_local_CFLAGS) \
 	$(CFLAGS) $(AM_LDFLAGS) $(LDFLAGS) -o $@
-am_ss_manager_OBJECTS = utils.$(OBJEXT) netutils.$(OBJEXT) \
-	jconf.$(OBJEXT) json.$(OBJEXT) manager.$(OBJEXT)
+am_ss_manager_OBJECTS = utils.$(OBJEXT) jconf.$(OBJEXT) json.$(OBJEXT) \
+	manager.$(OBJEXT)
 ss_manager_OBJECTS = $(am_ss_manager_OBJECTS)
 ss_manager_DEPENDENCIES = $(am__DEPENDENCIES_2)
 am__ss_redir_SOURCES_DIST = utils.c jconf.c json.c encrypt.c \
@@ -392,10 +392,9 @@ ss_server_SOURCES = utils.c \
                     server.c
 
 ss_manager_SOURCES = utils.c \
-					netutils.c \
-                    jconf.c \
-                    json.c \
-                    manager.c
+                     jconf.c \
+                     json.c \
+                     manager.c
 
 ss_local_LDADD = $(SS_COMMON_LIBS) $(top_builddir)/libudns/libudns.la
 ss_tunnel_LDADD = $(SS_COMMON_LIBS) $(top_builddir)/libudns/libudns.la
@@ -571,7 +570,6 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libshadowsocks_la-utils.Plo@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libshadowsocks_la-win32.Plo@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/manager.Po@am__quote@
-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/netutils.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/ss_local-acl.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/ss_local-cache.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/ss_local-encrypt.Po@am__quote@

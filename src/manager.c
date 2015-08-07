@@ -616,8 +616,10 @@ int main(int argc, char **argv)
 
     sfd = socket(AF_UNIX, SOCK_DGRAM, 0);       /*  Create server socket */
     if (sfd == -1) {
-        ERROR("socket");
+        FATAL("socket");
     }
+
+    setnonblocking(sfd);
 
     /*  Construct well-known address and bind server socket to it */
 

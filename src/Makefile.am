@@ -53,10 +53,9 @@ ss_server_SOURCES = utils.c \
                     server.c
 
 ss_manager_SOURCES = utils.c \
-					netutils.c \
-                    jconf.c \
-                    json.c \
-                    manager.c
+                     jconf.c \
+                     json.c \
+                     manager.c
 
 ss_local_LDADD = $(SS_COMMON_LIBS)
 ss_tunnel_LDADD = $(SS_COMMON_LIBS)
