@@ -132,7 +132,7 @@ static void stat_update_cb(EV_P_ ev_timer *watcher, int revents)
     char resp[BUF_SIZE];
 
     if (verbose) {
-        LOGI("update traffic stat: tx: %ld rx: %ld", tx, rx);
+        LOGI("update traffic stat: tx: %lld rx: %lld", tx, rx);
     }
 
     sfd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -157,7 +157,7 @@ static void stat_update_cb(EV_P_ ev_timer *watcher, int revents)
     svaddr.sun_family = AF_UNIX;
     strncpy(svaddr.sun_path, manager_address, sizeof(svaddr.sun_path) - 1);
 
-    snprintf(resp, BUF_SIZE, "stat: {\"%s\":%ld}", server_port, tx + rx);
+    snprintf(resp, BUF_SIZE, "stat: {\"%s\":%lld}", server_port, tx + rx);
     msgLen = strlen(resp) + 1;
     if (sendto(sfd, resp, strlen(resp) + 1, 0, (struct sockaddr *) &svaddr,
                 sizeof(struct sockaddr_un)) != msgLen) {
