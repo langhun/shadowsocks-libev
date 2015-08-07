@@ -311,7 +311,7 @@ static void update_stat(char *port, uint64_t traffic)
     void *ret = cork_hash_table_get(server_table, (void*)port);
     if (ret != NULL) {
         struct server *server = (struct server *)ret;
-        server->traffic += traffic;
+        server->traffic = traffic;
     }
 }
 
@@ -355,7 +355,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         char msg[3] = "ok";
         if (sendto(manager->fd, msg, 3, 0, (struct sockaddr *)&claddr, len) != 3) {
-            ERROR("add_sento");
+            ERROR("add_sendto");
         }
 
     } else if (strcmp(action, "remove") == 0) {
@@ -374,7 +374,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         char msg[3] = "ok";
         if (sendto(manager->fd, msg, 3, 0, (struct sockaddr *)&claddr, len) != 3) {
-            ERROR("remove_sento");
+            ERROR("remove_sendto");
         }
 
     } else if (strcmp(action, "stat") == 0) {
@@ -390,7 +390,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         char msg[3] = "ok";
         if (sendto(manager->fd, msg, 3, 0, (struct sockaddr *)&claddr, len) != 3) {
-            ERROR("stat_sento");
+            ERROR("stat_sendto");
         }
 
     } else if (strcmp(action, "ping") == 0) {
@@ -412,7 +412,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
                 buf[pos - 1] = '}';
                 if (sendto(manager->fd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
                         != pos + 1) {
-                    ERROR("stat_sento");
+                    ERROR("ping_sendto");
                 }
                 memset(buf, 0, BUF_SIZE);
             } else {
@@ -428,8 +428,8 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
         }
 
         if (sendto(manager->fd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
-                != pos + 1) {
-            ERROR("ping_sento");
+               != pos + 1) {
+            ERROR("ping_sendto");
         }
     }
 
@@ -438,7 +438,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 ERROR_MSG:
     strcpy(buf, "err");
     if (sendto(manager->fd, buf, 4, 0, (struct sockaddr *)&claddr, len) != 4) {
-        ERROR("error_sento");
+        ERROR("error_sendto");
     }
 }
 
