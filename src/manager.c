@@ -87,7 +87,7 @@ static void signal_cb(EV_P_ ev_signal *w, int revents);
 
 int verbose = 0;
 
-static struct cork_hash_table servers;
+static struct cork_hash_table server_table;
 
 #ifndef __MINGW32__
 int setnonblocking(int fd)
@@ -165,7 +165,7 @@ static struct server *get_server(char *buf, int len) {
     return server;
 }
 
-static int get_traffic(char *buf, int len, char *port, uint64_t *traffic) {
+static int parse_traffic(char *buf, int len, char *port, uint64_t *traffic) {
     char *data = get_data(buf, len);
 
     obj = json_parse_ex(&settings, data, strlen(data), error_buf);
@@ -189,17 +189,51 @@ static int get_traffic(char *buf, int len, char *port, uint64_t *traffic) {
     return 0;
 }
 
-static void add_server(struct server *server)
+static void add_server(struct manager_ctx *manager, struct server *server)
 {
+    bool new = false;
+    cork_hash_table_put(server_table, (void *)server->port, (void *)server, &new, NULL, NULL);
+
+    char *cmd = construct_command_line(manager, server);
+    system(cmd);
+}
+
+static void stop_server(char *port)
+{
+    char path[128];
+    int pid;
+    snprintf(path, 128, "/var/run/shadowsocks_%s.pid", port);
+    FILE *f = open(path, "r");
+    fscanf(f, "%d", pid);
+    close(f);
+    kill(pid, SIGTERM);
 
 }
 
 static void remove_server(struct server *server)
 {
+    char *old_port; struct server *old_server;
+    cork_hash_table_delete(server_table, (void *)server->port, (void **)&old_port, (void **)old_server);
 
+    if (old_port != null) {
+        stop_server(old_port);
+    }
+
+    if (old_server) {
+        free(old_server);
+    }
 }
 
 static void update_stat(char *port, uint64_t traffic)
+{
+    void *ret = cork_hash_table_get(server_table, (void*)port);
+    if (ret != NULL) {
+        struct server *server = (struct server *)ret;
+        server->traffic += traffic;
+    }
+}
+
+static void send_stat(char *buf, size_t len, int fd, struct sockaddr *claddr)
 {
 
 }
@@ -265,53 +299,42 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
         update_stat(port, traffic);
 
     } else if (strcmp(action, "ping") == 0) {
+
+        struct cork_hash_table_entry  *entry;
+        struct cork_hash_table_iterator server_iter;
+        size_t count = 0;
+
+        char buf[BUF_SIZE];
+
+        memset(buf, 0, BUF_SIZE);
+        sprintf(buf, "stat: {");
+
+        cork_hash_table_iterator_init(server_table, &server_iter);
+
+        while((entry = cork_hash_table_iterator_next(&server_iter)) != NULL) {
+            struct server *server = (struct server*)entry->value;
+            size_t pos = strlen(buf);
+            if (pos > BUF_SIZE / 2) {
+                buf[pos - 1] = '}';
+                if (sendto(sfd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
+                        != pos + 1) {
+                    ERROR("stat_sento");
+                }
+                memset(buf, 0, BUF_SIZE);
+            } else {
+                sprintf(buf + pos, "\"%s\":%ld,", server->port, server->traffic);
+            }
+        }
+
+        size_t pos = strlen(buf);
+        if (pos > 0) {
+            buf[pos - 1] = '}';
+            if (sendto(sfd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
+                    != pos + 1) {
+                ERROR("stat_sento");
+            }
+        }
     }
-
-
-        if (sendto(sfd, buf, numBytes, 0, (struct sockaddr *) &claddr, len) !=
-                numBytes)
-            fatal("sendto");
-    struct sockaddr_un svaddr, claddr;
-    int sfd;
-    size_t msgLen;
-    char resp[BUF_SIZE];
-
-    if (verbose) {
-        LOGI("update traffic stat: tx: %ld rx: %ld", tx, rx);
-    }
-
-    sfd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (sfd == -1) {
-        ERROR("stat_socket");
-        return;
-    }
-
-    memset(&claddr, 0, sizeof(struct sockaddr_un));
-    claddr.sun_family = AF_UNIX;
-    snprintf(claddr.sun_path, sizeof(claddr.sun_path), "/tmp/shadowsocks.%s", server_port);
-
-    unlink(claddr.sun_path);
-
-    if (bind(sfd, (struct sockaddr *) &claddr, sizeof(struct sockaddr_un)) == -1) {
-        ERROR("stat_bind");
-        close(sfd);
-        return;
-    }
-
-    memset(&svaddr, 0, sizeof(struct sockaddr_un));
-    svaddr.sun_family = AF_UNIX;
-    strncpy(svaddr.sun_path, manager_address, sizeof(svaddr.sun_path) - 1);
-
-    snprintf(resp, BUF_SIZE, "stat: {\"%s\":%ld}", server_port, tx + rx);
-    msgLen = strlen(resp) + 1;
-    if (sendto(sfd, resp, strlen(resp) + 1, 0, (struct sockaddr *) &svaddr,
-                sizeof(struct sockaddr_un)) != msgLen) {
-        ERROR("stat_sendto");
-        return;
-    }
-
-    close(sfd);
-    unlink(claddr.sun_path);
 }
 
 static void signal_cb(EV_P_ ev_signal *w, int revents)
@@ -325,9 +348,9 @@ static void signal_cb(EV_P_ ev_signal *w, int revents)
     }
 }
 
-void construct_command_line(struct manager_ctx *manager, struct server *server) {
+char *construct_command_line(struct manager_ctx *manager, struct server *server) {
     const int buf_size = 512;
-    char cmd[buf_size];
+    static char cmd[buf_size];
     memset(cmd, 0, buf_size);
     snprintf(cmd, buf_size,
             "ss-server -p %s -m %s -k %s --manager-address %s -f /var/run/shadowsocks_%s.pid",
@@ -592,83 +615,52 @@ int main(int argc, char **argv)
         run_as(user);
     }
 
-    // Init connections
-    cork_dllist_init(&connections);
-
-    // start ev loop
-    ev_run(loop, 0);
+    server_table = cork_string_hash_table_new(MAX_PORT_NUM, 0);
 
     struct sockaddr_un svaddr, claddr;
-    int sfd, j;
+    int sfd;
     socklen_t len;
 
     sfd = socket(AF_UNIX, SOCK_DGRAM, 0);       /*  Create server socket */
-    if (sfd == -1)
-        errExit("socket");
+    if (sfd == -1) {
+        ERROR("socket");
+    }
 
     /*  Construct well-known address and bind server socket to it */
 
-    if (remove(SV_SOCK_PATH) == -1 && errno != ENOENT)
-        errExit("remove-%s", SV_SOCK_PATH);
+    if (remove(manager_address) == -1 && errno != ENOENT) {
+        FATAL("remove");
+    }
 
     memset(&svaddr, 0, sizeof(struct sockaddr_un));
     svaddr.sun_family = AF_UNIX;
     strncpy(svaddr.sun_path, SV_SOCK_PATH, sizeof(svaddr.sun_path) - 1);
 
-    if (bind(sfd, (struct sockaddr *) &svaddr, sizeof(struct sockaddr_un)) == -1)
-        errExit("bind");
+    if (bind(sfd, (struct sockaddr *) &svaddr, sizeof(struct sockaddr_un)) == -1) {
+        FATAL("bind");
+    }
 
     manager.fd = sfd;
     ev_io_init(&manager.io, manager_recv_cb, manager.fd, EV_READ);
     ev_io_start(loop, &manager.io);
 
-
-    /*  Receive messages, convert to uppercase, and return to client
-     *  */
-
-    for (;;) {
-        len = sizeof(struct sockaddr_un);
-        numBytes = recvfrom(sfd, buf, BUF_SIZE, 0, (struct sockaddr *) &claddr, &len);
-        if (numBytes == -1)
-            errExit("recvfrom");
-
-        printf("Server received %ld bytes from %s\n", (long) numBytes,
-                claddr.sun_path);
-
-        for (j = 0; j < numBytes; j++)
-            buf[j] = toupper((unsigned char) buf[j]);
-
-        if (sendto(sfd, buf, numBytes, 0, (struct sockaddr *) &claddr, len) !=
-                numBytes)
-            fatal("sendto");
-    }
+    // start ev loop
+    ev_run(loop, 0);
 
     if (verbose) {
         LOGI("closed gracefully");
     }
 
-    if (manager_address != NULL) {
-        ev_timer_stop(EV_DEFAULT, &stat_update_watcher);
-    }
-
     // Clean up
-    for (int i = 0; i <= server_num; i++) {
-        struct listen_ctx *listen_ctx = &listen_ctx_list[i];
-        if (mode != UDP_ONLY) {
-            ev_io_stop(loop, &listen_ctx->io);
-            close(listen_ctx->fd);
-        }
-    }
+    struct cork_hash_table_entry  *entry;
+    struct cork_hash_table_iterator server_iter;
 
-    if (mode != UDP_ONLY) {
-        free_connections(loop);
-    }
+    cork_hash_table_iterator_init(server_table, &server_iter);
 
-    if (mode != TCP_ONLY) {
-        free_udprelay();
+    while((entry = cork_hash_table_iterator_next(&server_iter)) != NULL) {
+        struct server *server = (struct server*)entry->value;
+        stop_server(server->port);
     }
-
-    resolv_shutdown(loop);
 
 #ifdef __MINGW32__
     winsock_cleanup();
