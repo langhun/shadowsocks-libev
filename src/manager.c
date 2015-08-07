@@ -383,7 +383,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         if (parse_traffic(buf, r, port, &traffic) == -1) {
             LOGE("invalid command: %s:%s", buf, get_data(buf, r));
-            goto ERROR_MSG;
+            return;
         }
 
         update_stat(port, traffic);
