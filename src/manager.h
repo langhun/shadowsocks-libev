@@ -27,9 +27,7 @@
 #include <time.h>
 #include <libcork/ds.h>
 
-#include "encrypt.h"
 #include "jconf.h"
-#include "resolv.h"
 
 #include "common.h"
 
@@ -47,7 +45,7 @@ struct manager_ctx {
     char *user;
     char *manager_address;
     char **hosts;
-    int host_number;
+    int host_num;
     char **nameservers;
     int nameserver_num;
 };

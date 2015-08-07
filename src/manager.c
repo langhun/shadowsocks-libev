@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <math.h>
+#include <ctype.h>
 
 #ifndef __MINGW32__
 #include <netdb.h>
@@ -60,8 +61,9 @@
 #define SET_INTERFACE
 #endif
 
+#include "json.h"
 #include "utils.h"
-#include "server.h"
+#include "manager.h"
 
 #ifndef EAGAIN
 #define EAGAIN EWOULDBLOCK
@@ -84,10 +86,11 @@
 #endif
 
 static void signal_cb(EV_P_ ev_signal *w, int revents);
+static char *construct_command_line(struct manager_ctx *manager, struct server *server);
 
 int verbose = 0;
 
-static struct cork_hash_table server_table;
+static struct cork_hash_table *server_table;
 
 #ifndef __MINGW32__
 int setnonblocking(int fd)
@@ -131,14 +134,16 @@ static char *get_action(char *buf, int len) {
 }
 
 static struct server *get_server(char *buf, int len) {
-    struct server *server = (struct server *)malloc(sizeof(struct server));
     char *data = get_data(buf, len);
+    char error_buf[512];
+    struct server *server = (struct server *)malloc(sizeof(struct server));
 
     memset(server, 0, sizeof(struct server));
+    json_settings settings = { 0 };
+    json_value *obj = json_parse_ex(&settings, data, strlen(data), error_buf);
 
-    obj = json_parse_ex(&settings, data, strlen(data), error_buf);
     if (obj == NULL) {
-        LOGE(error_buf);
+        LOGE("%s", error_buf);
         return NULL;
     }
 
@@ -157,20 +162,24 @@ static struct server *get_server(char *buf, int len) {
                 }
             } else {
                 LOGE("invalid data: %s", data);
-                return NULl;
+                json_value_free(obj);
+                return NULL;
             }
         }
     }
 
+    json_value_free(obj);
     return server;
 }
 
 static int parse_traffic(char *buf, int len, char *port, uint64_t *traffic) {
     char *data = get_data(buf, len);
+    char error_buf[512];
+    json_settings settings = { 0 };
 
-    obj = json_parse_ex(&settings, data, strlen(data), error_buf);
+    json_value *obj = json_parse_ex(&settings, data, strlen(data), error_buf);
     if (obj == NULL) {
-        LOGE(error_buf);
+        LOGE("%s", error_buf);
         return -1;
     }
 
@@ -186,6 +195,7 @@ static int parse_traffic(char *buf, int len, char *port, uint64_t *traffic) {
         }
     }
 
+    json_value_free(obj);
     return 0;
 }
 
@@ -195,7 +205,9 @@ static void add_server(struct manager_ctx *manager, struct server *server)
     cork_hash_table_put(server_table, (void *)server->port, (void *)server, &new, NULL, NULL);
 
     char *cmd = construct_command_line(manager, server);
-    system(cmd);
+    if (system(cmd) == -1) {
+        ERROR("add_server_system");
+    }
 }
 
 static void stop_server(char *port)
@@ -203,19 +215,20 @@ static void stop_server(char *port)
     char path[128];
     int pid;
     snprintf(path, 128, "/var/run/shadowsocks_%s.pid", port);
-    FILE *f = open(path, "r");
-    fscanf(f, "%d", pid);
-    close(f);
-    kill(pid, SIGTERM);
+    FILE *f = fopen(path, "r");
+    if (fscanf(f, "%d", &pid) != EOF) {
+        kill(pid, SIGTERM);
+    }
+    fclose(f);
 
 }
 
-static void remove_server(struct server *server)
+static void remove_server(char *port)
 {
     char *old_port; struct server *old_server;
-    cork_hash_table_delete(server_table, (void *)server->port, (void **)&old_port, (void **)old_server);
+    cork_hash_table_delete(server_table, (void *)port, (void **)&old_port, (void **)&old_server);
 
-    if (old_port != null) {
+    if (old_port != NULL) {
         stop_server(old_port);
     }
 
@@ -233,26 +246,18 @@ static void update_stat(char *port, uint64_t traffic)
     }
 }
 
-static void send_stat(char *buf, size_t len, int fd, struct sockaddr *claddr)
-{
-
-}
-
 static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 {
     struct manager_ctx *manager = (struct manager_ctx *)w;
     socklen_t len;
     size_t r;
+    struct sockaddr_un claddr;
     char buf[BUF_SIZE];
+
     memset(buf, 0, BUF_SIZE);
 
-    json_value *obj;
-    json_settings settings = { 0 };
-    char error_buf[512];
-
-
     len = sizeof(struct sockaddr_un);
-    r = recvfrom(sfd, buf, BUF_SIZE, 0, (struct sockaddr *) &claddr, &len);
+    r = recvfrom(manager->fd, buf, BUF_SIZE, 0, (struct sockaddr *) &claddr, &len);
     if (r == -1) {
         ERROR("manager_recvfrom");
         return;
@@ -274,7 +279,7 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
         }
 
         remove_server(server->port);
-        add_server(server);
+        add_server(manager, server);
 
     } else if (strcmp(action, "remove") == 0) {
         struct server *server = get_server(buf, r);
@@ -289,9 +294,9 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
     } else if (strcmp(action, "stat") == 0) {
         char port[8];
-        uint64_t traffic;
+        uint64_t traffic = 0;
 
-        if (get_traffic(buf, r, port, &traffic) == -1) {
+        if (parse_traffic(buf, r, port, &traffic) == -1) {
             LOGE("invalid command: %s", buf);
             return;
         }
@@ -302,7 +307,6 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
 
         struct cork_hash_table_entry  *entry;
         struct cork_hash_table_iterator server_iter;
-        size_t count = 0;
 
         char buf[BUF_SIZE];
 
@@ -316,20 +320,20 @@ static void manager_recv_cb(EV_P_ ev_io *w, int revents)
             size_t pos = strlen(buf);
             if (pos > BUF_SIZE / 2) {
                 buf[pos - 1] = '}';
-                if (sendto(sfd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
+                if (sendto(manager->fd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
                         != pos + 1) {
                     ERROR("stat_sento");
                 }
                 memset(buf, 0, BUF_SIZE);
             } else {
-                sprintf(buf + pos, "\"%s\":%ld,", server->port, server->traffic);
+                sprintf(buf + pos, "\"%s\":%"PRIu64",", server->port, server->traffic);
             }
         }
 
         size_t pos = strlen(buf);
         if (pos > 0) {
             buf[pos - 1] = '}';
-            if (sendto(sfd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
+            if (sendto(manager->fd, buf, pos + 1, 0, (struct sockaddr *)&claddr, len)
                     != pos + 1) {
                 ERROR("stat_sento");
             }
@@ -348,57 +352,60 @@ static void signal_cb(EV_P_ ev_signal *w, int revents)
     }
 }
 
-char *construct_command_line(struct manager_ctx *manager, struct server *server) {
-    const int buf_size = 512;
-    static char cmd[buf_size];
-    memset(cmd, 0, buf_size);
-    snprintf(cmd, buf_size,
+static char *construct_command_line(struct manager_ctx *manager, struct server *server) {
+    static char cmd[BUF_SIZE];
+    int i;
+
+    memset(cmd, 0, BUF_SIZE);
+    snprintf(cmd, BUF_SIZE,
             "ss-server -p %s -m %s -k %s --manager-address %s -f /var/run/shadowsocks_%s.pid",
             server->port, manager->method, server->password, manager->manager_address, server->port);
     if (manager->acl != NULL) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " --acl %s", manager->acl);
+        snprintf(cmd + len, BUF_SIZE - len, " --acl %s", manager->acl);
     }
     if (manager->timeout != NULL) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -t %s", manager->timeout);
+        snprintf(cmd + len, BUF_SIZE - len, " -t %s", manager->timeout);
     }
     if (manager->user != NULL) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -a %s", manager->user);
+        snprintf(cmd + len, BUF_SIZE - len, " -a %s", manager->user);
     }
     if (manager->verbose) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -v");
+        snprintf(cmd + len, BUF_SIZE - len, " -v");
     }
     if (manager->mode == UDP_ONLY) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -U");
+        snprintf(cmd + len, BUF_SIZE - len, " -U");
     }
     if (manager->mode == TCP_AND_UDP) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -u");
+        snprintf(cmd + len, BUF_SIZE - len, " -u");
     }
     if (manager->mode == TCP_AND_UDP) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -u");
+        snprintf(cmd + len, BUF_SIZE - len, " -u");
     }
     if (manager->fast_open) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " --fast_open");
+        snprintf(cmd + len, BUF_SIZE - len, " --fast_open");
     }
-    for (int i = 0; i < manager->nameserver_num; i++) {
+    for (i = 0; i < manager->nameserver_num; i++) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -d %s", manager->nameservers[i]);
+        snprintf(cmd + len, BUF_SIZE - len, " -d %s", manager->nameservers[i]);
     }
-    for (int i = 0; i < manager->host_num; i++) {
+    for (i = 0; i < manager->host_num; i++) {
         int len = strlen(cmd);
-        snprintf(cmd + len, buf_size - len, " -s %s", manager->hosts[i]);
+        snprintf(cmd + len, BUF_SIZE - len, " -s %s", manager->hosts[i]);
     }
 
     if (verbose) {
         LOGI("cmd: %s", cmd);
     }
+
+    return cmd;
 }
 
 int main(int argc, char **argv)
@@ -414,12 +421,18 @@ int main(int argc, char **argv)
     char *pid_path = NULL;
     char *conf_path = NULL;
     char *iface = NULL;
+    char *manager_address = NULL;
+
+    int fast_open = 0;
+    int mode = TCP_ONLY;
 
     int server_num = 0;
-    const char *server_host[MAX_REMOTE_NUM];
+    char *server_host[MAX_REMOTE_NUM];
 
     char * nameservers[MAX_DNS_NUM + 1];
     int nameserver_num = 0;
+
+    jconf_t *conf = NULL;
 
     int option_index = 0;
     static struct option long_options[] =
@@ -434,7 +447,7 @@ int main(int argc, char **argv)
 
     USE_TTY();
 
-    while ((c = getopt_long(argc, argv, "f:s:p:l:k:t:m:c:i:d:a:uUv",
+    while ((c = getopt_long(argc, argv, "f:s:l:k:t:m:c:i:d:a:uUv",
                             long_options, &option_index)) != -1) {
         switch (c) {
         case 0:
@@ -450,9 +463,6 @@ int main(int argc, char **argv)
             if (server_num < MAX_REMOTE_NUM) {
                 server_host[server_num++] = optarg;
             }
-            break;
-        case 'p':
-            server_port = optarg;
             break;
         case 'k':
             password = optarg;
@@ -499,15 +509,12 @@ int main(int argc, char **argv)
     }
 
     if (conf_path != NULL) {
-        jconf_t *conf = read_jconf(conf_path);
+        conf = read_jconf(conf_path);
         if (server_num == 0) {
             server_num = conf->remote_num;
             for (i = 0; i < server_num; i++) {
                 server_host[i] = conf->remote_addr[i].host;
             }
-        }
-        if (server_port == NULL) {
-            server_port = conf->remote_port;
         }
         if (password == NULL) {
             password = conf->password;
@@ -523,21 +530,6 @@ int main(int argc, char **argv)
             fast_open = conf->fast_open;
         }
 #endif
-#ifdef HAVE_SETRLIMIT
-        if (nofile == 0) {
-            nofile = conf->nofile;
-        }
-        /*
-         * no need to check the return value here since we will show
-         * the user an error message if setrlimit(2) fails
-         */
-        if (nofile) {
-            if (verbose) {
-                LOGI("setting NOFILE to %d", nofile);
-            }
-            set_nofile(nofile);
-        }
-#endif
         if (conf->nameserver != NULL) {
             nameservers[nameserver_num++] = conf->nameserver;
         }
@@ -545,11 +537,6 @@ int main(int argc, char **argv)
 
     if (server_num == 0) {
         server_host[server_num++] = NULL;
-    }
-
-    if (server_num == 0 || server_port == NULL || password == NULL) {
-        usage();
-        exit(EXIT_FAILURE);
     }
 
     if (method == NULL) {
@@ -603,7 +590,7 @@ int main(int argc, char **argv)
     manager.user = user;
     manager.manager_address = manager_address;
     manager.hosts = server_host;
-    manager.server_num= server_num;
+    manager.host_num = server_num;
     manager.nameservers = nameservers;
     manager.nameserver_num = nameserver_num;
 
@@ -617,9 +604,15 @@ int main(int argc, char **argv)
 
     server_table = cork_string_hash_table_new(MAX_PORT_NUM, 0);
 
-    struct sockaddr_un svaddr, claddr;
+    if (conf != NULL) {
+        for (i = 0; i < conf->port_password_num; i++) {
+            struct server *server = (struct server *)malloc(sizeof(struct server));
+            add_server(&manager, server);
+        }
+    }
+
+    struct sockaddr_un svaddr;
     int sfd;
-    socklen_t len;
 
     sfd = socket(AF_UNIX, SOCK_DGRAM, 0);       /*  Create server socket */
     if (sfd == -1) {
@@ -634,7 +627,7 @@ int main(int argc, char **argv)
 
     memset(&svaddr, 0, sizeof(struct sockaddr_un));
     svaddr.sun_family = AF_UNIX;
-    strncpy(svaddr.sun_path, SV_SOCK_PATH, sizeof(svaddr.sun_path) - 1);
+    strncpy(svaddr.sun_path, manager_address, sizeof(svaddr.sun_path) - 1);
 
     if (bind(sfd, (struct sockaddr *) &svaddr, sizeof(struct sockaddr_un)) == -1) {
         FATAL("bind");
