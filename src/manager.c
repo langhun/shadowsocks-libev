@@ -655,6 +655,8 @@ int main(int argc, char **argv)
     if (conf != NULL) {
         for (i = 0; i < conf->port_password_num; i++) {
             struct server *server = (struct server *)malloc(sizeof(struct server));
+            strncpy(server->port, conf->port_password[i].port, 8);
+            strncpy(server->password, conf->port_password[i].password, 128);
             add_server(&manager, server);
         }
     }
